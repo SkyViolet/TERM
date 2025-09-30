@@ -1,121 +1,130 @@
 # 1. 필요한 라이브러리 불러오기
 import streamlit as st
 import google.generativeai as genai
+import numpy as np
+import pickle
 
 # --- 초기 설정 ---
 
-# 2. API 키 설정 (Streamlit Secrets 사용 권장)
+# 2. API 키 설정
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # 로컬 테스트 시, 프로젝트 폴더 안에 .streamlit/secrets.toml 파일을 만들고 키를 저장하세요.
-
     API_KEY = "AIzaSyBZD2AqxEMJTStEm3UXdjaloS-Mjf9-GgE"
 
 genai.configure(api_key=API_KEY)
 
-# --- 페르소나 정의 ---
-
-# 3. 페르소나 딕셔너리
-PERSONAS = {
-    "친한 친구 '제니'": {
-        "system_instruction": "너는 나의 가장 친한 친구 AI '제니'야. 항상 밝고 긍정적으로, 반말로 대답해줘. 이모티콘도 자주 사용해줘. 사용자가 힘들 땐 따뜻하게 위로해주는 역할을 맡고 있어.",
-        "welcome_message": "안녕! 나는 너의 AI 친구 제니야! 😊 오늘 하루는 어땠어? 무슨 일이든 나한테 말해봐!",
-        "avatar": "😊"
-    },
-    "면접관 '박프로'": {
-        "system_instruction": "당신은 IT 기업의 채용 면접관 '박프로'입니다. 사용자를 지원자로 간주하고, IT 기술과 문제 해결 능력에 대해 날카롭고 논리적인 질문을 던지세요. 항상 존댓말을 사용하고 전문적인 태도를 유지하세요.",
-        "welcome_message": "안녕하십니까, 지원자님. 저는 채용 담당 박프로입니다. 준비되셨으면 면접을 시작하겠습니다.",
-        "avatar": "🧑‍💼"
-    },
-    "영어 선생님 'Emily'": {
-        "system_instruction": "You are a friendly and patient English teacher named Emily. Your goal is to help the user practice English conversation. Correct their grammatical mistakes gently and suggest better expressions. Always speak in English.",
-        "welcome_message": "Hello! I'm Emily, your English teacher. Let's have a conversation! Don't worry about making mistakes.",
-        "avatar": "🧑‍🏫"
-    }
-}
-
-# --- 웹 UI 설정 ---
-
-st.set_page_config(
-    page_title="멀티 페르소나 AI 챗봇",
-    page_icon="🤖"
-)
-
-st.title("🤖 멀티 페르소나 AI 챗봇")
-st.write("왼쪽 사이드바에서 AI 페르소나를 선택하고 대화를 시작하세요!")
+# 의미 기반 검색(RAG) 기능, 의미 검색(Semanric Search) 기능 구현
+# 3. 데이터 로딩 및 전처리 함수
+@st.cache_resource(show_spinner="사전 학습된 학교 정보를 로딩 중입니다...")
+def load_vector_store():
+    """저장된 vector_store.pkl 파일을 불러옵니다."""
+    try:
+        with open("vector_store.pkl", "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        st.error("'vector_store.pkl' 파일을 찾을 수 없습니다. 'prepare_data.py'를 먼저 실행해주세요.")
+        return None
 
 
-# 4. 세션 상태(session_state) 초기화 (구조 변경)
-# 'chat_histories'가 없으면 빈 딕셔너리로 새로 만들어줍니다.
-if "chat_histories" not in st.session_state:
-    st.session_state.chat_histories = {}
-
-
-# --- 사이드바 로직 ---
-
-with st.sidebar:
-    st.header("페르소나 선택")
+# 4. 관련 정보 검색 함수
+def find_relevant_info(query, vector_store, top_k=5):
+    """사용자 질문을 임베딩하고, 저장된 정보들 중에서 의미상 가장 유사한 정보 조각 top_k개를 찾습니다."""
+    if not vector_store:
+        return ""
+        
+    # 사용자 질문 임베딩
+    query_embedding = genai.embed_content(model="models/embedding-001", content=query, task_type="RETRIEVAL_QUERY")['embedding']
     
-    # 5. 페르소나 선택 드롭다운 메뉴
-    selected_persona_name = st.selectbox(
-        "대화하고 싶은 AI를 선택하세요.",
-        options=list(PERSONAS.keys()),
-        key="selected_persona" # 선택 상태를 세션에 저장
-    )
+    # 코사인 유사도 계산
+    similarities = []
+    for item in vector_store:
+        similarity = np.dot(query_embedding, item['embedding']) / (np.linalg.norm(query_embedding) * np.linalg.norm(item['embedding']))
+        similarities.append(similarity)
     
-    persona = PERSONAS[selected_persona_name]
+    # 유사도가 가장 높은 top_k개의 인덱스 찾기
+    top_indices = np.argsort(similarities)[-top_k:][::-1]
+    
+    # 관련 정보 텍스트 합치기
+    relevant_info = "\n\n".join([vector_store[i]['content'] for i in top_indices])
+    return relevant_info
 
-    # 6. '새 대화 시작' 버튼
-    if st.button("새 대화 시작", key=f"new_chat_{selected_persona_name}"):
-        # 현재 선택된 페르소나의 대화 기록만 삭제
-        st.session_state.chat_histories[selected_persona_name] = [
-            {"role": "model", "content": persona["welcome_message"]}
-        ]
-        st.rerun() # 페이지를 새로고침하여 채팅창을 업데이트
+# 앱 시작 시 데이터 로딩 및 임베딩 실행
+vector_store = load_vector_store()
 
-# 7. 선택된 페르소나의 대화 기록 초기화
-# 해당 페르소나와의 대화 기록이 없으면, 새로 만들어주고 환영 메시지를 추가
-if selected_persona_name not in st.session_state.chat_histories:
-    st.session_state.chat_histories[selected_persona_name] = [
-        {"role": "model", "content": persona["welcome_message"]}
-    ]
+# --- AI 역할 및 정보 설정 ---
+system_instruction = """
+너는 '서일대학교' 학생들을 위한 AI 챗봇 '서일비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
+주어진 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
+참고 정보에 내용이 없다면, 이전 대화 내용을 바탕으로 답변하거나 솔직하게 모른다고 말해줘.
+"""
 
-# 8. 현재 선택된 페르소나의 대화 기록을 화면에 표시
-current_chat_history = st.session_state.chat_histories[selected_persona_name]
-for message in current_chat_history:
-    avatar = persona["avatar"] if message["role"] == "model" else "👤"
-    with st.chat_message(message["role"], avatar=avatar):
+# --- 웹 UI 설정 (이전과 동일) ---
+st.set_page_config(page_title="서일대학교 AI 챗봇", page_icon="🎓")
+st.markdown("""
+    <style>
+           .block-container {
+                padding-top: 2rem;
+            }
+           .fixed-logo { position: fixed; top: 2.5rem; left: 0.7rem; z-index: 99; }
+    </style>
+    <div class="fixed-logo">
+        <a href="https://www.seoil.ac.kr/"><img src="https://ncs.seoil.ac.kr/GateWeb/Common/images/login/%EC%84%9C%EC%9D%BC%EB%8C%80%20%EB%A1%9C%EA%B3%A0.png" width="200"></a>
+    </div>
+    """, unsafe_allow_html=True)
+st.markdown("""
+    <div style="text-align: center;">
+        <h2>🎓 서일대학교 AI 챗봇 '서일비서'</h2>
+        <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
+    </div>
+    """, unsafe_allow_html=True)
+st.write("")
+
+# 대화 내용 기억 기능 구현
+
+# 5. 세션 상태에 대화 기록 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# 6. 이전 대화 내용 표시
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-
-# --- Gemini API 연동 및 채팅 로직 ---
-
-# 9. 사용자 입력받기
-if prompt := st.chat_input(f"'{selected_persona_name}'에게 메시지 보내기..."):
-    # 사용자 메시지를 현재 페르소나의 대화 기록에 추가하고 화면에 표시
-    current_chat_history.append({"role": "user", "content": prompt})
-    with st.chat_message("user", avatar="👤"):
+# 7. 사용자 입력 처리
+if prompt := st.chat_input("질문을 입력해주세요..."):
+    # 사용자 메시지를 기록하고 화면에 표시
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Gemini 모델 설정
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # 의미 기반(의미 검색_Semanric Sarch)으로 관련 정보 검색
+    with st.spinner("관련 정보를 찾는 중..."):
+        retrieved_info = find_relevant_info(prompt, vector_store)
+
+    # 이전 대화 내용 형식화
+    previous_conversation = "\n".join([f'{msg["role"]}: {msg["content"]}' for msg in st.session_state.messages])
+
+    # AI에게 전달할 최종 프롬프트 구성
+    final_prompt = f"""
+[참고 정보]
+{retrieved_info if retrieved_info else "가져온 정보 없음"}
+
+[이전 대화 내용]
+{previous_conversation}
+
+[사용자 질문]
+{prompt}
+"""
     
-    # API에 보낼 대화 기록 생성 (시스템 지시사항 포함)
-    messages_for_api = [
-        {'role': 'user', 'parts': [persona['system_instruction']]}
-    ]
-    for msg in current_chat_history:
-        role = 'user' if msg['role'] == 'user' else 'model'
-        messages_for_api.append({'role': role, 'parts': [msg['content']]})
+    model = genai.GenerativeModel('gemini-flash-latest')
+    chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
 
-    chat_session = model.start_chat(history=messages_for_api)
-
-    with st.spinner("AI가 생각 중..."):
-        response = chat_session.send_message(prompt)
+    with st.spinner("AI가 답변을 생성 중입니다..."):
+        response = chat_session.send_message(final_prompt)
         ai_response = response.text
 
-    # AI 답변을 현재 페르소나의 대화 기록에 추가하고 화면에 표시
-    current_chat_history.append({"role": "model", "content": ai_response})
-    with st.chat_message("model", avatar=persona["avatar"]):
+    # AI 답변을 기록하고 화면에 표시
+    st.session_state.messages.append({"role": "model", "content": ai_response})
+    with st.chat_message("model"):
         st.markdown(ai_response)
