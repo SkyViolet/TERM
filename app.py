@@ -55,11 +55,10 @@ vector_store = load_vector_store()
 # --- AI 역할 및 정보 설정 ---
 system_instruction = """
 너는 '서일대학교' 학생들을 위한 AI 챗봇 '서일비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
-주어진 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
-참고 정보에 내용이 없다면, 이전 대화 내용을 바탕으로 답변하거나 솔직하게 모른다고 말해줘.
+기존에 답변 가능한 범위의 질문을 우선적으로 답변하고 정확한 정보가 없다면 주어진 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
+참고 정보에도 내용이 없다면, 이전 대화 내용을 바탕으로 답변하거나 솔직하게 모른다고 말해줘.
 """
 
-# --- 웹 UI 설정 (이전과 동일) ---
 st.set_page_config(page_title="서일대학교 AI 챗봇", page_icon="🎓")
 st.markdown("""
     <style>
@@ -79,8 +78,6 @@ st.markdown("""
     </div>
     """, unsafe_allow_html=True)
 st.write("")
-
-# 대화 내용 기억 기능 구현
 
 # 5. 세션 상태에 대화 기록 초기화
 if "messages" not in st.session_state:
@@ -102,6 +99,17 @@ if prompt := st.chat_input("질문을 입력해주세요..."):
     with st.spinner("관련 정보를 찾는 중..."):
         retrieved_info = find_relevant_info(prompt, vector_store)
 
+    # --- [ 디버깅 코드 ] --- 디버깅시 #7의 코드 주석처리
+    #with st.spinner("관련 정보를 찾는 중..."):
+     #    retrieved_info = find_relevant_info(prompt, vector_store)
+
+    # AI에게 전달될 참고 정보를 화면에 정보(info) 박스로 표시
+    #if retrieved_info:
+     #   st.info(f"**[AI 참고 정보]**\n\n---\n\n{retrieved_info}")
+    #else:
+     #   st.error("**[AI 참고 정보]**\n\n---\n\n관련 정보를 찾지 못했습니다.")
+    # --- [ 디버깅 코드 ] ---
+
     # 이전 대화 내용 형식화
     previous_conversation = "\n".join([f'{msg["role"]}: {msg["content"]}' for msg in st.session_state.messages])
 
@@ -120,11 +128,15 @@ if prompt := st.chat_input("질문을 입력해주세요..."):
     model = genai.GenerativeModel('gemini-flash-latest')
     chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
 
-    with st.spinner("AI가 답변을 생성 중입니다..."):
+    with st.chat_message("model"):
+        # 1. stream=True 옵션을 제거하여 일반적인 방식으로 API 호출
         response = chat_session.send_message(final_prompt)
+
+        # 2. 응답 객체(response)에서 .text를 사용해 "순수 텍스트"만 추출
         ai_response = response.text
 
-    # AI 답변을 기록하고 화면에 표시
-    st.session_state.messages.append({"role": "model", "content": ai_response})
-    with st.chat_message("model"):
+        # 3. 추출된 텍스트를 화면에 표시
         st.markdown(ai_response)
+
+    # 4. 깨끗하게 추출된 텍스트를 대화 기록에 저장
+    st.session_state.messages.append({"role": "model", "content": ai_response})

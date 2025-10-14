@@ -3,11 +3,33 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 import pickle
+import pandas as pd
 
 # 본인의 API 키를 입력하세요
-API_KEY = "AIzaSyA82LrwZs-SBtfl4REcClLGbDv1-Na2iO4"
+API_KEY = "AIzaSyBZD2AqxEMJTStEm3UXdjaloS-Mjf9-GgE"
 genai.configure(api_key=API_KEY)
 
+def scrape_and_process_page(topic, url):
+    """
+    모든 페이지에서 id='_contentBuilder' 영역을 우선적으로 찾아서 처리하는 함수.
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # ✨ 모든 페이지에 적용되는 단 하나의 핵심 로직 ✨
+    main_content = soup.find(id='_contentBuilder')
+
+    if main_content:
+        print(f" INFO: '{topic}' 페이지에서 id='_contentBuilder' 내용을 추출했습니다.")
+        return main_content.get_text(separator='\n', strip=True)
+    else:
+        print(f"  -> WARN: '{topic}' 페이지에서 id='_contentBuilder' 영역을 찾지 못했습니다. 전체 텍스트를 추출합니다.")
+        return soup.get_text(separator='\n', strip=True)
+        
 def prepare_and_save_embeddings():
     print("서일대학교 홈페이지 정보 스크레이핑 시작...")
     urls = {
@@ -15,7 +37,7 @@ def prepare_and_save_embeddings():
         "공지사항": "https://www.seoil.ac.kr/seoil/598/subview.do",
         "행사안내": "https://www.seoil.ac.kr/seoil/600/subview.do",
         "홍보사항": "https://www.seoil.ac.kr/seoil/602/subview.do",
-        "셔틀버스": "https://www.seoil.ac.kr/seoil/520/subview.do",
+        #"셔틀버스": "https://www.seoil.ac.kr/seoil/520/subview.do",
         "서일대학교": "https://www.seoil.ac.kr/sites/seoil/index.do",
         "학교소식": "https://www.seoil.ac.kr/seoil/616/subview.do",
         "스터디공간": "https://www.seoil.ac.kr/seoil/583/subview.do",
@@ -26,31 +48,32 @@ def prepare_and_save_embeddings():
         "편의시설": "https://www.seoil.ac.kr/seoil/587/subview.do",
         "체육시설": "https://www.seoil.ac.kr/seoil/588/subview.do",
         "대학생활메뉴얼": "https://www.seoil.ac.kr/seoil/3409/subview.do",
-        "찾아오시는길": "https://www.seoil.ac.kr/seoil/520/subview.do"
-
-
+        "찾아오시는길" "셔틀버스": "https://www.seoil.ac.kr/seoil/520/subview.do"
     }
     
     all_chunks = []
     for topic, url in urls.items():
         try:
-            response = requests.get(url, timeout=600)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            text = soup.get_text(separator='\n', strip=True)
+            text = scrape_and_process_page(topic, url)
+            if not text.strip():
+                print(f"  -> WARN: '{topic}' 페이지에서 추출된 텍스트가 없습니다.")
+                continue
+            
             for i in range(0, len(text), 500):
                 chunk = text[i:i+500]
                 all_chunks.append({"topic": topic, "content": chunk})
             print(f"✅ '{topic}' 페이지 스크레이핑 완료")
-        except requests.RequestException as e:
-            print(f"❌ '{topic}' 페이지 스크레이핑 실패: {e}")
+
+        except Exception as e:
+            print(f"❌ '{topic}' 페이지 처리 중 오류 발생: {e}")
             continue
 
     print("\n텍스트 조각들을 임베딩하는 중... (시간이 걸릴 수 있습니다)")
     if not all_chunks:
         print("스크레이핑된 데이터가 없어 임베딩을 진행할 수 없습니다.")
         return
-        
+    
+    # 임베딩할 콘텐츠 리스트 (오류 수정)
     contents = [chunk['content'] for chunk in all_chunks]
     embedding_result = genai.embed_content(model="models/embedding-001", content=contents, task_type="RETRIEVAL_DOCUMENT")
     
