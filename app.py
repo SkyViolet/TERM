@@ -1,4 +1,3 @@
-# 1. 필요한 라이브러리 불러오기
 import streamlit as st
 import google.generativeai as genai
 import chromadb
@@ -44,7 +43,6 @@ try:
     genai.configure(api_key=API_KEY)
     
 except (KeyError, FileNotFoundError):
-    # 2. 하드코딩된 키를 완전히 삭제하고, 키가 없으면 앱을 중지시킵니다.
     st.error("GEMINI_API_KEY가 .streamlit/secrets.toml에 설정되지 않았습니다.")
     st.stop()
 except Exception as e:
@@ -93,6 +91,8 @@ def parse_firebase_error(response_text):
         error_json = json.loads(response_text)
         error_message = error_json.get('error', {}).get('message', '알 수 없는 오류')
         
+        if error_message == "INVALID_LOGIN_CREDENTIALS":
+            return "이메일 또는 비밀번호가 올바르지 않습니다."
         if error_message == "EMAIL_NOT_FOUND":
             return "등록되지 않은 이메일입니다."
         elif error_message == "INVALID_PASSWORD":
@@ -144,15 +144,19 @@ def sign_in_with_google(google_id_token):
 
         name_response = requests.get(user_db_url)
         user_name = "사용자"
+        user_interests = None
         
-        if name_response.status_code == 200 and name_response.json() and 'name' in name_response.json():
-            user_name = name_response.json()['name']
+        if name_response.status_code == 200 and name_response.json():
+            name_data = name_response.json()
+            user_name = name_data.get('name', '사용자')
+            user_interests = name_data.get('interests')
         else:
             user_name = user_data.get('displayName', '사용자')
-            user_data_payload = {"name": user_name, "email": email}
+            # [수정] 신규 가입 시 interests: None 추가
+            user_data_payload = {"name": user_name, "email": email, "interests": None}
             requests.put(user_db_url, json=user_data_payload)
             
-        return {"email": email, "uid": uid, "name": user_name, "idToken": id_token}
+        return {"email": email, "uid": uid, "name": user_name, "idToken": id_token, "interests": user_interests}
     else:
         st.error(f"Google 로그인 실패: {parse_firebase_error(response.text)}")
         return None
@@ -198,88 +202,178 @@ def set_page(page):
 if st.session_state.logged_in:
     # --- 1. [로그인 성공 시] 챗봇 메인 앱 ---
     
-    # 상단에 로그아웃 버튼과 환영 메시지 표시
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.write(f"**{st.session_state.user_info['name']}**님, 서일비서에 오신 것을 환영합니다!")
-    with col2:
-        if st.button("로그아웃"):
-            st.session_state.logged_in = False
-            st.session_state.user_info = None
-            st.rerun() # 로그아웃 시 새로고침
-
-    # --- 여기서부터 기존 챗봇 UI 및 로직 ---
-    collection = load_chroma_collection() # DB 로드
+    # [수정] 1. Onboarding/Chat 페이지 라우팅 로직
     
-    system_instruction = """
-    너는 '서일대학교' 학생들을 위한 AI 챗봇 '서일비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
-    기존에 답변 가능한 범위의 질문을 받았다면 원래 하던 답변대로 응답해.
-    # 사용자의 질문이 아래 [서일대학교 핵심 고정 정보]와 관련이 있다면,
-    # [참고 정보]를 보기 전에 이 내용을 바탕으로 "즉시" 답변해줘.
+    # 'interests' 필드가 None이면 (신규 가입자) 'onboarding'으로 강제 설정
+    if st.session_state.user_info.get('interests') is None:
+        st.session_state.page = 'onboarding'
+    else:
+        # interests가 None이 아니면(즉, 이미 온보딩을 완료했으면)
+        # page 상태가 'login'(초기 상태)일 경우 'chat'으로 변경
+        if st.session_state.page == 'login':
+            st.session_state.page = 'chat'
 
-    [서일대학교 핵심 고정 정보]
-    **1. 셔틀버스 및 찾아오시는 길**
-    * **지하철**: 7호선 면목역(서일대입구) 2번 출구
-    * **파랑(간선)버스**: 271번 (서일대 하차)
-    * **녹색(지선)버스**: 2013번, 2230번, 1213번
-    * **노랑(마을)버스**: 중랑2번
-    * **대학 셔틀버스 (학기 중 평일 오전 운행)**
-        * **운행 시간**: 오전 08:30 ~ 10:30
-        * **배차 간격**: 20분~25분 간격
-        * **승차 위치 (망우역)**: 1번 출구 역앞 로터리
-        * **승차 위치 (면목역)**: 2번 출구 버스정류장 위
-        * **비고**: 운행시간 외에는 운행하지 않습니다.
+    # 2. 페이지 라우팅
+    if st.session_state.page == 'onboarding':
+        # --- 1-A. 온보딩 페이지\ ---
+        st.title("🎓 용용이 비서 시작하기")
+        st.subheader(f"{st.session_state.user_info['name']}님, 환영합니다!")
+        st.write("챗봇이 맞춤형 정보를 추천해드릴 수 있도록, 관심사를 선택해주세요. (선택사항)")
 
-    **2. 주요 편의시설**
-    * **학생식당**: 동아리관 2F
-        * **운영시간**: 11:00 ~ 13:30
-    * **편의점 (emart24)**: 배양관 B2
-        * **운영시간**: 오전 08:00 ~ 오후 17:00(학기 중 운영)
-    * **카페 (CAFEING)**: 흥학관 2F
-        * **운영시간**: 평일 09:00 ~ 18:00
-    * # 만약 위 [핵심 고정 정보]에 내용이 없다면,
-    # 그 때 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
-    # 참고 정보에도 내용이 없다면 솔직하게 모른다고 말해줘.
-    """
-    
-    st.markdown("""
-        <style>
-                .block-container { padding-top: 10rem; }
-                .fixed-logo { position: fixed; top: 2.5rem; left: 1rem; z-index: 99; }
-        </style>
-        <div class="fixed-logo">
-            <a href="https://www.seoil.ac.kr/"><img src="https://ncs.seoil.ac.kr/GateWeb/Common/images/login/%EC%84%9C%EC%9D%BC%EB%8C%80%20%EB%A1%9C%EA%B3%A0.png" width="200"></a>
-        </div>
-        """, unsafe_allow_html=True)
-    st.markdown("""
-        <div style="text-align: center;">
-            <h2>🎓 서일대학교 AI 챗봇 '서일비서'</h2>
-            <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
-        </div>
-        """, unsafe_allow_html=True)
-    st.write("")
+        INTEREST_OPTIONS = [
+            "학사공지", "장학금", "셔틀버스", 
+            "도서관", "학생식당", "카페", "편의점"
+        ]
+        
+        selected_interests = st.multiselect(
+            "관심있는 주제를 모두 선택해주세요. (여러 개 선택 가능)",
+            INTEREST_OPTIONS
+        )
 
-    # 5. 세션 상태에 대화 기록 초기화
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+        # "저장하기"와 "건너뛰기" 버튼
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("저장하기", use_container_width=True, type="primary"):
+                # "저장하기" 로직 (선택한 리스트 저장)
+                with st.spinner("관심사 저장 중..."):
+                    uid = st.session_state.user_info['uid']
+                    token = st.session_state.user_info['idToken']
+                    db_url = FIREBASE_DB_URL
+                    if not db_url.endswith('/'): 
+                        db_url += '/'
+                    user_db_url = f"{db_url}users/{uid}/interests.json?auth={token}"
+                    
+                    response = requests.put(user_db_url, json=selected_interests) 
+                    
+                    if response.status_code == 200:
+                        st.session_state.user_info['interests'] = selected_interests
+                        st.session_state.page = 'chat' # 챗봇 페이지로 전환
+                        st.success("저장되었습니다! 챗봇을 시작합니다.")
+                        st.rerun()
+                    else:
+                        st.error("관심사 저장에 실패했습니다. 다시 시도해주세요.")
 
-    # 6. 이전 대화 내용 표시
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        with col2:
+            if st.button("건너뛰기", use_container_width=True):
+                # "건너뛰기" 로직 (빈 리스트 '[]' 저장)
+                with st.spinner("설정 저장 중..."):
+                    uid = st.session_state.user_info['uid']
+                    token = st.session_state.user_info['idToken']
+                    db_url = FIREBASE_DB_URL
+                    if not db_url.endswith('/'): 
+                        db_url += '/'
+                    user_db_url = f"{db_url}users/{uid}/interests.json?auth={token}"
+                    
+                    # [중요] 빈 리스트를 저장하여 다시는 이 페이지가 안 뜨게 함
+                    response = requests.put(user_db_url, json=[]) 
+                    
+                    if response.status_code == 200:
+                        st.session_state.user_info['interests'] = []
+                        st.session_state.page = 'chat' # 챗봇 페이지로 전환
+                        st.rerun()
+                    else:
+                        st.error("설정 저장에 실패했습니다. 다시 시도해주세요.")
 
-    # 7. 사용자 입력 처리 (기존 코드와 동일)
-    if prompt := st.chat_input("질문을 입력해주세요..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    elif st.session_state.page == 'chat':
 
-        with st.spinner("관련 정보를 찾는 중..."):
-            retrieved_info = find_relevant_info(prompt, collection)
+        # 상단에 로그아웃 버튼과 환영 메시지 표시
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.write(f"**{st.session_state.user_info['name']}**님, 서일비서에 오신 것을 환영합니다!")
+        with col2:
+            # [수정] 로그아웃 버그 수정
+            if st.button("로그아웃"):
+                st.session_state.logged_in = False
+                st.session_state.user_info = None
+                st.session_state.page = 'login' # page 상태를 'login'으로 리셋
+                st.rerun() # 로그아웃 시 새로고침
 
-        previous_conversation = "\n".join([f'{msg["role"]}: {msg["content"]}' for msg in st.session_state.messages])
+        # --- 여기서부터 기존 챗봇 UI 및 로직 ---
+        collection = load_chroma_collection() # DB 로드
+        
+        # [신규] 1. 사용자의 관심사 불러오기
+        user_interests_list = st.session_state.user_info.get('interests', [])
+        
+        # [신규] 2. 관심사 문자열 생성
+        if user_interests_list: # 리스트가 None이나 []가 아닐 경우
+            interests_string = ", ".join(user_interests_list)
+            interest_prompt_part = f"\n\n# 사용자의 개인 맞춤 관심사는 [{interests_string}]입니다. 사용자가 이 주제와 관련하여 질문하면, 이 정보를 바탕으로 더 친절하고 상세하게 답변해주세요."
+        else:
+            interest_prompt_part = "" # 관심사가 없으면 아무것도 추가하지 않음
 
-        final_prompt = f"""
+        # [신규] 3. 최종 시스템 프롬프트에 관심사 삽입
+        system_instruction = f"""
+        너는 '서일대학교' 학생들을 위한 AI 챗봇 '서일비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
+        {interest_prompt_part}
+
+        기존에 답변 가능한 범위의 질문을 받았다면 원래 하던 답변대로 응답해.
+        # 사용자의 질문이 아래 [서일대학교 핵심 고정 정보]와 관련이 있다면,
+        # [참고 정보]를 보기 전에 이 내용을 바탕으로 "즉시" 답변해줘.
+
+        [서일대학교 핵심 고정 정보]
+        **1. 셔틀버스 및 찾아오시는 길**
+        * **지하철**: 7호선 면목역(서일대입구) 2번 출구
+        * **파랑(간선)버스**: 271번 (서일대 하차)
+        * **녹색(지선)버스**: 2013번, 2230번, 1213번
+        * **노랑(마을)버스**: 중랑2번
+        * **대학 셔틀버스 (학기 중 평일 오전 운행)**
+            * **운행 시간**: 오전 08:30 ~ 10:30
+            * **배차 간격**: 20분~25분 간격
+            * **승차 위치 (망우역)**: 1번 출구 역앞 로터리
+            * **승차 위치 (면목역)**: 2번 출구 버스정류장 위
+            * **비고**: 운행시간 외에는 운행하지 않습니다.
+
+        **2. 주요 편의시설**
+        * **학생식당**: 동아리관 2F
+            * **운영시간**: 11:00 ~ 13:30
+        * **편의점 (emart24)**: 배양관 B2
+            * **운영시간**: 오전 08:00 ~ 오후 17:00(학기 중 운영)
+        * **카페 (CAFEING)**: 흥학관 2F
+            * **운영시간**: 평일 09:00 ~ 18:00
+        * # 만약 위 [핵심 고정 정보]에 내용이 없다면,
+        # 그 때 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
+        # 참고 정보에도 내용이 없다면 솔직하게 모른다고 말해줘.
+        """
+        
+        st.markdown("""
+            <style>
+                    .block-container { padding-top: 10rem; }
+                    .fixed-logo { position: fixed; top: 2.5rem; left: 1rem; z-index: 99; }
+            </style>
+            <div class="fixed-logo">
+                <a href="https://www.seoil.ac.kr/"><img src="https://ncs.seoil.ac.kr/GateWeb/Common/images/login/%EC%84%9C%EC%9D%BC%EB%8C%80%20%EB%A1%9C%EA%B3%A0.png" width="200"></a>
+            </div>
+            """, unsafe_allow_html=True)
+        st.markdown("""
+            <div style="text-align: center;">
+                <h2>🎓 서일대학교 AI 챗봇 '서일비서'</h2>
+                <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        st.write("")
+
+        # 5. 세션 상태에 대화 기록 초기화
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+
+        # 6. 이전 대화 내용 표시
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # 7. 사용자 입력 처리 (기존 코드와 동일)
+        if prompt := st.chat_input("질문을 입력해주세요..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.spinner("관련 정보를 찾는 중..."):
+                retrieved_info = find_relevant_info(prompt, collection)
+
+            previous_conversation = "\n".join([f'{msg["role"]}: {msg["content"]}' for msg in st.session_state.messages])
+
+            final_prompt = f"""
 [참고 정보]
 {retrieved_info if retrieved_info else "가져온 정보 없음"}
 [이전 대화 내용]
@@ -287,16 +381,16 @@ if st.session_state.logged_in:
 [사용자 질문]
 {prompt}
 """
-        
-        model = genai.GenerativeModel('gemini-flash-latest')
-        chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
+            
+            model = genai.GenerativeModel('gemini-flash-latest')
+            chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
 
-        with st.chat_message("model"):
-            response = chat_session.send_message(final_prompt)
-            ai_response = response.text
-            st.markdown(ai_response)
+            with st.chat_message("model"):
+                response = chat_session.send_message(final_prompt)
+                ai_response = response.text
+                st.markdown(ai_response)
 
-        st.session_state.messages.append({"role": "model", "content": ai_response})
+            st.session_state.messages.append({"role": "model", "content": ai_response})
 else:
     st.markdown(f"""
         <style>
@@ -354,7 +448,7 @@ else:
             text-decoration: underline !important;
         }}
 
-        /* --- Google 로그인 버튼 (밝은 회색 - Secondary) --- */
+        /* --- Google 로그인 버튼 --- */
         .google-btn-container {{
             display: flex;
             justify-content: center;
@@ -427,11 +521,21 @@ else:
                         if not db_url.endswith('/'): 
                             db_url += '/'
                         user_db_url = f"{db_url}users/{uid}.json?auth={id_token}"
-                       
+                        
                         name_response = requests.get(user_db_url)
 
+                        user_name = "사용자"
+                        user_interests = None 
+                        
+                        if name_response.status_code == 200:
+                            name_data = name_response.json()
+                            if name_data: 
+                                user_name = name_data.get('name', '사용자')
+                                user_interests = name_data.get('interests')
+
                         st.session_state.logged_in = True
-                        st.session_state.user_info = {"email": user_data['email'], "uid": uid, "name": name_response, "idToken": id_token}
+                        # user_info에 interests 추가
+                        st.session_state.user_info = {"email": user_data['email'], "uid": uid, "name": user_name, "idToken": id_token, "interests": user_interests}
                         st.rerun()
                     else:
                         st.error(parse_firebase_error(response.text))
@@ -444,7 +548,7 @@ else:
 
             # 회원가입 전환 링크
             st.button("계정이 없으시면 회원가입하기", on_click=set_page, args=('signup',), use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            # st.markdown('</div>', unsafe_allow_html=True) # <-- 이 줄이 원본 코드에 있었으나 삭제함
 
         elif st.session_state.page == 'signup':
             # --- 2-B. 회원가입 폼 ---
@@ -471,8 +575,9 @@ else:
                             db_url = FIREBASE_DB_URL
                             if not db_url.endswith('/'): 
                                 db_url += '/'
-                            user_db_url = f"{FIREBASE_DB_URL}users/{uid}.json?auth={id_token}"
-                            user_data_payload = {"name": signup_name, "email": signup_email}
+                            # db_url 변수 사용 및 interests: None 추가
+                            user_db_url = f"{db_url}users/{uid}.json?auth={id_token}"
+                            user_data_payload = {"name": signup_name, "email": signup_email, "interests": None}
                             put_response = requests.put(user_db_url, json=user_data_payload)
                             if put_response.status_code == 200:
                                 st.success("회원가입이 완료되었습니다! '로그인' 탭에서 로그인해주세요.")
@@ -481,13 +586,13 @@ else:
                             else:
                                 st.error(f"회원가입은 되었으나, 이름 저장 실패: {put_response.text}")
                         else:
-                            st.error(parse_firebase_error(response.text))    
+                            st.error(parse_firebase_error(response.text)) 
 
-            # "or" 구분선
-            st.markdown('<p class="or-divider">or</p>', unsafe_allow_html=True)
+                # "or" 구분선
+                st.markdown('<p class="or-divider">or</p>', unsafe_allow_html=True)
                 
-            # Google 회원가입 버튼
-            st.markdown(google_btn_html, unsafe_allow_html=True)
+                # Google 회원가입 버튼
+                st.markdown(google_btn_html, unsafe_allow_html=True)
                         
             # 로그인 전환 링크
             st.button("이미 계정이 있다면 로그인하기.", on_click=set_page, args=('login',), use_container_width=True)
