@@ -3,8 +3,26 @@ import google.generativeai as genai
 import chromadb
 import requests
 import json
+import time
+import base64
+from PIL import Image
 
-st.set_page_config(page_title="서일대학교 용용이 비서", page_icon="🎓") # 아이콘 나중에 용용이 이미지로 바꾸기
+def get_base64_of_bin_file(bin_file):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+try:
+    img_base64 = get_base64_of_bin_file("yongyong.png")
+    yongyong_icon_html = f'<img src="data:image/png;base64,{img_base64}" style="width: 40px; height: 40px; vertical-align: middle; margin-right: 10px;">'
+except FileNotFoundError:
+    yongyong_icon_html = "🎓"
+
+try:
+    icon_image = Image.open("yongyong.png")
+    st.set_page_config(page_title="서일대학교 용용이 비서", page_icon=icon_image)
+except FileNotFoundError:
+    st.set_page_config(page_title="서일대학교 용용이 비서", page_icon="🎓")
 
 try:
     FIREBASE_API_KEY = st.secrets["firebase_web"]["apiKey"]
@@ -37,6 +55,8 @@ if 'user_info' not in st.session_state:
     st.session_state.user_info = None # {'email', 'uid', 'name', 'idToken'}
 if 'page' not in st.session_state:
     st.session_state.page = 'login'
+if 'user_msg_count' not in st.session_state:
+    st.session_state.user_msg_count = 0
 try:
     # 1. secrets.toml에서만 키를 불러옵니다.
     API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -106,6 +126,87 @@ def parse_firebase_error(response_text):
     except json.JSONDecodeError:
         return "알 수 없는 오류가 발생했습니다. (오류 메시지 파싱 실패)"
 
+# 채팅 기록을 Firebase에 저장하는 함수
+def save_chat_log(uid, token, role, message):
+    """채팅 메시지를 Firebase Realtime Database에 저장합니다."""
+    
+    # uid나 token이 없으면 저장하지 않음
+    if not uid or not token:
+        return
+    try:
+        # timestamp를 키로 사용하여 시간순으로 정렬
+        timestamp = int(time.time() * 1000)
+        chat_ref = f"chat_history/{uid}/{timestamp}"
+        
+        data = {
+            "role": role,
+            "content": message,
+            "timestamp": timestamp
+        }
+        
+        db_url = FIREBASE_DB_URL # 전역 변수 사용
+        if not db_url.endswith('/'): 
+            db_url += '/'
+        
+        save_url = f"{db_url}{chat_ref}.json?auth={token}"
+        
+        # requests.put을 사용하되, 앱이 멈추지 않게 timeout 설정
+        requests.put(save_url, json=data, timeout=3)
+    except Exception as e:
+        print(f"Log save error: {e}")
+    except requests.exceptions.RequestException as e:
+        # 사용자에게 오류를 띄우는 대신, 터미널에만 로그를 남김
+        print(f"Error saving chat log to Firebase: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred in save_chat_log: {e}")
+
+# --- 키워드 분석 및 업데이트 함수 ---
+def analyze_chat_keywords(uid, token):
+    """채팅 기록을 분석하여 키워드를 추출하고 DB에 업데이트합니다."""
+    try:
+        db_url = FIREBASE_DB_URL
+        if not db_url.endswith('/'): db_url += '/'
+        
+        # 1. 채팅 기록 가져오기
+        load_url = f"{db_url}chat_history/{uid}.json?auth={token}"
+        response = requests.get(load_url)
+        
+        if response.status_code != 200 or not response.json():
+            return []
+
+        chat_data = response.json()
+        # 최근 대화 10개만 분석 (6개로 축소하여 최근 주제만을 강조 가능)
+        full_text = ""
+        for key in sorted(chat_data.keys())[-10:]: 
+            msg = chat_data[key]
+            if msg['role'] == 'user':
+                full_text += msg['content'] + "\n"
+        
+        if len(full_text) < 5: return []
+
+        # 2. Gemini에게 키워드 추출 요청
+        analysis_model = genai.GenerativeModel('gemini-flash-latest')
+        prompt = f"""
+        다음은 사용자가 AI와 나눈 대화 내용이야. 
+        이 사용자가 관심 있어 하는 핵심 주제나 키워드를 3개만 단어 형태로 추출해줘.
+        결과는 콤마(,)로만 구분해서 알려줘. 설명은 필요 없어.
+        (예시: 장학금, 셔틀버스, 수강신청)
+
+        [대화 내용]
+        {full_text}
+        """
+        result = analysis_model.generate_content(prompt).text
+        keywords = [k.strip() for k in result.split(',') if k.strip()]
+        
+        # 3. DB에 저장
+        update_url = f"{db_url}users/{uid}/dynamic_keywords.json?auth={token}"
+        requests.put(update_url, json=keywords)
+        
+        return keywords
+    except Exception as e:
+        print(f"Analysis error: {e}")
+        return []
+    
 def exchange_code_for_token(code):
     """Google로부터 받은 'code'를 'id_token'으로 교환합니다."""
     payload = {
@@ -145,15 +246,17 @@ def sign_in_with_google(google_id_token):
         name_response = requests.get(user_db_url)
         user_name = "사용자"
         user_interests = None
+        user_dynamic_keywords = []
         
         if name_response.status_code == 200 and name_response.json():
             name_data = name_response.json()
             user_name = name_data.get('name', '사용자')
             user_interests = name_data.get('interests')
+            user_dynamic_keywords = name_data.get('dynamic_keywords', [])
         else:
             user_name = user_data.get('displayName', '사용자')
-            # [수정] 신규 가입 시 interests: None 추가
-            user_data_payload = {"name": user_name, "email": email, "interests": None}
+            # 신규 가입 시 dynamic_keywords: [] 초기화
+            user_data_payload = {"name": user_name, "email": email, "interests": None, dynamic_keywords: []}
             requests.put(user_db_url, json=user_data_payload)
             
         return {"email": email, "uid": uid, "name": user_name, "idToken": id_token, "interests": user_interests}
@@ -174,7 +277,7 @@ def get_google_auth_url():
     req = requests.Request('GET', AUTH_URL, params=params)
     return req.prepare().url
 
-# --- Google 로그인 리디렉션 처리 (URL에 'code'가 있는지 확인) ---
+# --- Google 로그인 리디렉션 처리 ---
 if 'code' in st.query_params:
     auth_code = st.query_params["code"]
     
@@ -202,7 +305,7 @@ def set_page(page):
 if st.session_state.logged_in:
     # --- 1. [로그인 성공 시] 챗봇 메인 앱 ---
     
-    # [수정] 1. Onboarding/Chat 페이지 라우팅 로직
+    # 1. Onboarding/Chat 페이지 라우팅 로직
     
     # 'interests' 필드가 None이면 (신규 가입자) 'onboarding'으로 강제 설정
     if st.session_state.user_info.get('interests') is None:
@@ -216,9 +319,9 @@ if st.session_state.logged_in:
     # 2. 페이지 라우팅
     if st.session_state.page == 'onboarding':
         # --- 1-A. 온보딩 페이지\ ---
-        st.title("🎓 용용이 비서 시작하기")
+        st.markdown(f"<h1>{yongyong_icon_html} 용용이 비서 시작하기</h1>", unsafe_allow_html=True)
         st.subheader(f"{st.session_state.user_info['name']}님, 환영합니다!")
-        st.write("챗봇이 맞춤형 정보를 추천해드릴 수 있도록, 관심사를 선택해주세요. (선택사항)")
+        st.write("용용이 비서가 맞춤형 정보를 추천해드릴 수 있도록, 관심사를 선택해주세요. (선택사항)")
 
         INTEREST_OPTIONS = [
             "학사공지", "장학금", "셔틀버스", 
@@ -244,12 +347,14 @@ if st.session_state.logged_in:
                         db_url += '/'
                     user_db_url = f"{db_url}users/{uid}/interests.json?auth={token}"
                     
+                    update_data = {"interests": selected_interests, "dynamic_keywords": []}
                     response = requests.put(user_db_url, json=selected_interests) 
                     
                     if response.status_code == 200:
                         st.session_state.user_info['interests'] = selected_interests
+                        st.session_state.user_info['dynamic_keywords'] = []
                         st.session_state.page = 'chat' # 챗봇 페이지로 전환
-                        st.success("저장되었습니다! 챗봇을 시작합니다.")
+                        st.success("저장되었습니다! 용용이 비서를 시작합니다.")
                         st.rerun()
                     else:
                         st.error("관심사 저장에 실패했습니다. 다시 시도해주세요.")
@@ -270,6 +375,7 @@ if st.session_state.logged_in:
                     
                     if response.status_code == 200:
                         st.session_state.user_info['interests'] = []
+                        st.session_state.user_info['dynamic_keywords'] = []
                         st.session_state.page = 'chat' # 챗봇 페이지로 전환
                         st.rerun()
                     else:
@@ -277,34 +383,46 @@ if st.session_state.logged_in:
 
     elif st.session_state.page == 'chat':
 
-        # 상단에 로그아웃 버튼과 환영 메시지 표시
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.write(f"**{st.session_state.user_info['name']}**님, 서일비서에 오신 것을 환영합니다!")
-        with col2:
-            # [수정] 로그아웃 버그 수정
-            if st.button("로그아웃"):
-                st.session_state.logged_in = False
-                st.session_state.user_info = None
-                st.session_state.page = 'login' # page 상태를 'login'으로 리셋
-                st.rerun() # 로그아웃 시 새로고침
+        uid = st.session_state.user_info.get('uid')
+        token = st.session_state.user_info.get('idToken')
 
-        # --- 여기서부터 기존 챗봇 UI 및 로직 ---
+       # Popover 내부에서 사용할 콜백 함수 정의
+        def go_to_onboarding():
+            """관심사 수정 페이지로 이동"""
+            st.session_state.page = 'onboarding'
+        
+        def do_logout():
+            """로그아웃 처리"""
+            st.session_state.logged_in = False
+            st.session_state.user_info = None
+            st.session_state.page = 'login'
+        
+        user_initial = st.session_state.user_info['name']
+        
+        with st.popover(user_initial): # 👤
+            st.write(f"{st.session_state.user_info['name']}님, 환영합니다.")
+            st.divider()
+            st.button("관심사 수정", on_click=go_to_onboarding, use_container_width=True)
+            st.button("로그아웃", on_click=do_logout, use_container_width=True)
+            
+        st.markdown('</div>', unsafe_allow_html=True)
+
         collection = load_chroma_collection() # DB 로드
         
-        # [신규] 1. 사용자의 관심사 불러오기
-        user_interests_list = st.session_state.user_info.get('interests', [])
+        # 1. 사용자의 관심사 불러오기
+        static_interests = st.session_state.user_info.get('interests', []) or []
+        dynamic_keywords = st.session_state.user_info.get('dynamic_keywords', []) or []
+        all_interests = list(set(static_interests + dynamic_keywords))
         
-        # [신규] 2. 관심사 문자열 생성
-        if user_interests_list: # 리스트가 None이나 []가 아닐 경우
-            interests_string = ", ".join(user_interests_list)
-            interest_prompt_part = f"\n\n# 사용자의 개인 맞춤 관심사는 [{interests_string}]입니다. 사용자가 이 주제와 관련하여 질문하면, 이 정보를 바탕으로 더 친절하고 상세하게 답변해주세요."
+        if all_interests:
+            interests_string = ", ".join(all_interests)
+            interest_prompt_part = f"\n\n# 사용자의 관심사 및 최근 관심 키워드: [{interests_string}]\n사용자가 이 주제와 관련하여 질문하면, 이 정보를 바탕으로 더 상세하게 답변해주세요."
         else:
-            interest_prompt_part = "" # 관심사가 없으면 아무것도 추가하지 않음
+            interest_prompt_part = ""
 
-        # [신규] 3. 최종 시스템 프롬프트에 관심사 삽입
+        # 3. 최종 시스템 프롬프트에 관심사 삽입
         system_instruction = f"""
-        너는 '서일대학교' 학생들을 위한 AI 챗봇 '서일비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
+        너는 '서일대학교' 학생들을 위한 AI 챗봇 '용용이 비서'야. 학생들의 질문에 친절하고 정확하게 답변해야 해.
         {interest_prompt_part}
 
         기존에 답변 가능한 범위의 질문을 받았다면 원래 하던 답변대로 응답해.
@@ -335,20 +453,137 @@ if st.session_state.logged_in:
         # 그 때 [참고 정보]와 [이전 대화 내용]을 종합적으로 고려하여 답변을 생성해줘.
         # 참고 정보에도 내용이 없다면 솔직하게 모른다고 말해줘.
         """
-        
-        st.markdown("""
-            <style>
-                    .block-container { padding-top: 10rem; }
-                    .fixed-logo { position: fixed; top: 2.5rem; left: 1rem; z-index: 99; }
-            </style>
-            <div class="fixed-logo">
-                <a href="https://www.seoil.ac.kr/"><img src="https://ncs.seoil.ac.kr/GateWeb/Common/images/login/%EC%84%9C%EC%9D%BC%EB%8C%80%20%EB%A1%9C%EA%B3%A0.png" width="200"></a>
+        st.markdown(f"""
+            <div style="text-align: center;">
+                <h2>{yongyong_icon_html} 서일대학교 AI 챗봇 '용용이 비서'</h2>
+                <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
             </div>
             """, unsafe_allow_html=True)
+        st.write("")
+
+        if st.session_state.get("run_recommendation"):
+            
+            # 1. 클릭된 관심사를 가져오고 플래그를 즉시 제거
+            interest_query = st.session_state.run_recommendation
+            st.session_state.run_recommendation = None 
+            
+            # 2.채팅 기록이 없다면 초기화
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+                
+            # 3. 사용자가 버튼을 눌러 질문한 것처럼 채팅 기록에 추가
+            user_question = f"{interest_query} 관련 정보 알려줘"
+            st.session_state.messages.append({"role": "user", "content": user_question})
+            save_chat_log(uid, token, "user", user_question)
+
+            # 4. AI 응답 로직 실행
+            with st.spinner("관련 정보를 찾는 중..."):
+                retrieved_info = find_relevant_info(user_question, collection)
+            
+            previous_conversation = "\n".join([f'{msg["role"]}: {msg["content"]}' for msg in st.session_state.messages])
+            
+            final_prompt = f"""
+[참고 정보]
+{retrieved_info if retrieved_info else "가져온 정보 없음"}
+[이전 대화 내용]
+{previous_conversation}
+[사용자 질문]
+{user_question}
+"""
+            # (AI 모델 호출 및 응답 추가 로직)
+            model = genai.GenerativeModel('gemini-flash-latest')
+            chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
+            
+            with st.chat_message("model"):
+                with st.spinner("답변을 생성 중..."):
+                    response = chat_session.send_message(final_prompt)
+                    ai_response = response.text
+                    st.markdown(ai_response)
+            
+            st.session_state.messages.append({"role": "model", "content": ai_response})
+            save_chat_log(uid, token, "model", ai_response)
+            st.rerun()
+            
+        # --- 여기서부터 기존 챗봇 UI 및 로직 ---
         st.markdown("""
-            <div style="text-align: center;">
-                <h2>🎓 서일대학교 AI 챗봇 '서일비서'</h2>
-                <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
+            <style>
+                /* 1. Streamlit 기본 헤더 숨기기 (햄버거 메뉴 등) */
+                header[data-testid="stHeader"] {
+                    visibility: hidden;
+                    height: 0 !important;
+                }
+                
+                /* 2. Top Bar 컨테이너 */
+                .top-bar {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 4rem;      /* 상단 바 높이 설정 */
+                    background-color: #131314; /* 배경색: 흰색 */
+                    z-index: 9999;       /* 다른 요소들보다 위에 위치 */
+                    display: flex;       /* 내부 요소를 가로로 정렬 */
+                    align-items: center; /* 세로 중앙 정렬 */
+                    padding-left: 1rem;  /* 왼쪽 여백 */
+                    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05); /* 아주 연한 그림자 효과 */
+                }
+
+                /* 3. Top Bar 내부의 로고 이미지 스타일 */
+                .top-bar-logo {
+                    height: 3.5rem;      /* 로고 높이 (바 높이보다 약간 작게) */
+                    width: auto;         /* 비율 유지 */
+                    object-fit: contain;
+                }
+
+                /* 4. 본문(채팅창) 위치 조정 */
+                /* 상단 바가 생겼으므로 본문이 가려지지 않게 패딩을 줍니다 */
+                .block-container {
+                    padding-top: 5rem !important; /* 상단 바 높이(3.5rem) + 여유공간 */
+                }
+                    
+                div[data-testid="stPopover"] {
+                    position: fixed !important;
+                    top: 0.5rem !important;    /* 상단 여백 (Top bar 높이 내 중앙) */
+                    right: 1rem !important;    /* 우측 여백 */
+                    left: auto !important;     /* [중요] 왼쪽 기준 해제 (가로 꽉 참 방지) */
+                    width: auto !important;    /* [중요] 너비 자동 (내용물만큼만) */
+                    z-index: 10001 !important; /* Top bar보다 위 */
+                }
+
+                /* 2. 버튼 모양 동그랗게 만들기 */
+                div[data-testid="stPopover"] > button {
+                    background-color: #3C4043 !important; 
+                    color: #E8EAED !important; 
+                    border: none !important;
+                    border-radius: 50% !important; /* 완벽한 원형 */
+                    width: 3.5rem !important;      /* 가로 크기 고정 */
+                    height: 3.5rem !important;     /* 세로 크기 고정 */
+                    padding: 0 !important;         /* 내부 여백 제거 */
+                    display: flex !important;      /* 글자 중앙 정렬용 Flex */
+                    align-items: center !important;
+                    justify-content: center !important;
+                    font-size: 1.1rem !important;
+                    font-weight: 600 !important;
+                    box-shadow: none !important;   /* 기본 그림자 제거 */
+                }
+                
+                /* 3. 호버 효과 */
+                div[data-testid="stPopover"] > button:hover {
+                    background-color: #4A4E51 !important;
+                    color: #FFFFFF !important;
+                    border: 1px solid #5f6368 !important;
+                }
+                
+                /* 버튼 눌렀을 때 포커스 테두리 제거 */
+                div[data-testid="stPopover"] > button:focus {
+                    box-shadow: none !important;
+                    outline: none !important;
+            </style>
+            
+            <div class="top-bar">
+                <a href="https://www.seoil.ac.kr/" target="_blank">
+                    <img src="https://ncs.seoil.ac.kr/GateWeb/Common/images/login/%EC%84%9C%EC%9D%BC%EB%8C%80%20%EB%A1%9C%EA%B3%A0.png" class="top-bar-logo">
+                </a>
             </div>
             """, unsafe_allow_html=True)
         st.write("")
@@ -357,14 +592,42 @@ if st.session_state.logged_in:
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
-        # 6. 이전 대화 내용 표시
+        # 6. 추천 버튼 UI 생성 (채팅 내역이 비어있을 때만)
+        with st.expander("💡 맞춤 추천 질문 보기", expanded=(not st.session_state.messages)):
+            if all_interests:
+                cols = st.columns(len(all_interests)) if len(all_interests) < 5 else st.columns(4)
+                for i, interest in enumerate(all_interests):
+                    # 간단한 그리드 배치
+                    col = cols[i % 4] if len(all_interests) >= 5 else cols[i]
+                    with col:
+                        st.button(
+                            f"👉 {interest}", 
+                            key=f"rec_{interest}", 
+                            on_click=lambda i=interest: st.session_state.update(run_recommendation=i),
+                            use_container_width=True
+                        )
+            else:
+                st.info("관심사가 없습니다. 대화를 많이 나누면 추천이 생깁니다!")
+        
+        # 7. 이전 대화 내용 표시
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # 7. 사용자 입력 처리 (기존 코드와 동일)
+        # 8. 사용자 입력 처리 (기존 코드와 동일)
         if prompt := st.chat_input("질문을 입력해주세요..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
+            save_chat_log(uid, token, "user", prompt)
+
+            # 2회마다 키워드 학습 로직 실행
+            st.session_state.user_msg_count += 1
+            if st.session_state.user_msg_count % 2 == 0:
+                with st.spinner("AI가 대화 내용을 학습하여 관심사를 업데이트 중입니다..."):
+                    new_keywords = analyze_chat_keywords(uid, token)
+                    if new_keywords:
+                        st.session_state.user_info['dynamic_keywords'] = new_keywords
+                        st.toast(f"새로운 관심 키워드 발견! : {', '.join(new_keywords)}", icon="🎉")
+            
             with st.chat_message("user"):
                 st.markdown(prompt)
 
@@ -391,6 +654,7 @@ if st.session_state.logged_in:
                 st.markdown(ai_response)
 
             st.session_state.messages.append({"role": "model", "content": ai_response})
+            save_chat_log(uid, token, "model", ai_response)
 else:
     st.markdown(f"""
         <style>
@@ -456,7 +720,7 @@ else:
         }}
         .google-btn {{
             display: inline-block;
-            background: #3d3d3d; 
+            background: #131314; 
             color: #444;
             border: 1px solid #d0d7de;
             border-radius: 6px;
@@ -485,7 +749,7 @@ else:
 
     # --- 2. [로그인 안 된 상태] 로그인/회원가입 페이지 ---
     
-    st.markdown("<h1 style='text-align: center;'>🎓 서일대학교 용용이 비서</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='text-align: center;'>{yongyong_icon_html} 서일대학교 용용이 비서</h1>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align: center;'>로그인 또는 회원가입을 해주세요.</h3>", unsafe_allow_html=True)
 
     col1, col_main, col3 = st.columns([1, 3, 1])
@@ -526,16 +790,24 @@ else:
 
                         user_name = "사용자"
                         user_interests = None 
+                        user_dynamic_keywords = []
                         
                         if name_response.status_code == 200:
                             name_data = name_response.json()
                             if name_data: 
                                 user_name = name_data.get('name', '사용자')
                                 user_interests = name_data.get('interests')
+                                user_dynamic_keywords = name_data.get('dynamic_keywords', [])
 
                         st.session_state.logged_in = True
-                        # user_info에 interests 추가
-                        st.session_state.user_info = {"email": user_data['email'], "uid": uid, "name": user_name, "idToken": id_token, "interests": user_interests}
+                        st.session_state.user_info = {
+                            "email": user_data['email'],
+                            "uid": uid,
+                            "name": user_name,
+                            "idToken": id_token, 
+                            "interests": user_interests,
+                            "dynamic_keywords": user_dynamic_keywords
+                        }
                         st.rerun()
                     else:
                         st.error(parse_firebase_error(response.text))
@@ -577,7 +849,7 @@ else:
                                 db_url += '/'
                             # db_url 변수 사용 및 interests: None 추가
                             user_db_url = f"{db_url}users/{uid}.json?auth={id_token}"
-                            user_data_payload = {"name": signup_name, "email": signup_email, "interests": None}
+                            user_data_payload = {"name": signup_name, "email": signup_email, "interests": None, "dynamic_keywords": []}
                             put_response = requests.put(user_db_url, json=user_data_payload)
                             if put_response.status_code == 200:
                                 st.success("회원가입이 완료되었습니다! '로그인' 탭에서 로그인해주세요.")
