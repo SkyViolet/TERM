@@ -5,7 +5,7 @@ import requests
 import json
 import time
 import base64
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 def get_base64_of_bin_file(bin_file):
     with open(bin_file, 'rb') as f:
@@ -23,6 +23,44 @@ try:
     st.set_page_config(page_title="서일대학교 용용이 비서", page_icon=icon_image)
 except FileNotFoundError:
     st.set_page_config(page_title="서일대학교 용용이 비서", page_icon="🎓")
+
+SEOIL_LOCATIONS = {
+    "흥학관": {"x": 515, "y": 210, "desc": "1번 건물: 카페, 동아리방", "keywords": ["흥학관", "카페", "커피", "동아리"]},
+    "호천관": {"x": 370, "y": 250, "desc": "2번 건물: 열람실", "keywords": ["호천관"]},
+    "세종관": {"x": 490, "y": 150, "desc": "3번 건물: 강의실", "keywords": ["세종관", "강의실"]},
+    "서일관": {"x": 670, "y": 110, "desc": "4번 건물: 대학본부", "keywords": ["서일관", "본부", "총장실"]},
+    "지덕관": {"x": 750, "y": 140, "desc": "5번 건물: 학생회관", "keywords": ["지덕관", "학생회관"]},
+    "누리관": {"x": 835, "y": 160, "desc": "6번 건물: 종합정보관", "keywords": ["누리관", "정보관"]},
+    "도서관": {"x": 770, "y": 70, "desc": "7번 건물: 도서관", "keywords": ["도서관, 열람실, 책"]},
+    "배양관": {"x": 860, "y": 100, "desc": "8번 건물: 편의점(B2)", "keywords": ["배양관", "편의점", "매점"]},
+    "동아리관": {"x": 660, "y": 260, "desc": "9번 건물", "keywords": ["동아리관"]},
+    "정문": {"x": 615, "y": 325, "desc": "10번: 정문", "keywords": ["정문", "입구"]},
+}
+
+# --- 이미지 위에 위치 표시하는 함수 ---
+def highlight_building_on_image(target_name, x, y):
+    """
+    seoil_map.png 이미지를 불러와서 해당 좌표(x,y)에 빨간 동그라미를 그립니다.
+    """
+    try:
+        # 1. 기본 지도 이미지 불러오기
+        base_image = Image.open("seoil_map.png")
+        draw = ImageDraw.Draw(base_image)
+        
+        # 2. 동그라미 그리기 (반지름 30px)
+        radius = 30
+        # 빨간색 굵은 원 (두께 5)
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline="red", width=5)
+        
+        # 3. 반투명한 빨간색 채우기
+        # overlay = Image.new('RGBA', base_image.size, (255, 255, 255, 0))
+        # draw_overlay = ImageDraw.Draw(overlay)
+        # draw_overlay.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 0, 0, 60))
+        # base_image = Image.alpha_composite(base_image.convert('RGBA'), overlay)
+
+        return base_image
+    except FileNotFoundError:
+        return None
 
 try:
     FIREBASE_API_KEY = st.secrets["firebase_web"]["apiKey"]
@@ -256,7 +294,7 @@ def sign_in_with_google(google_id_token):
         else:
             user_name = user_data.get('displayName', '사용자')
             # 신규 가입 시 dynamic_keywords: [] 초기화
-            user_data_payload = {"name": user_name, "email": email, "interests": None, dynamic_keywords: []}
+            user_data_payload = {"name": user_name, "email": email, "interests": None, "dynamic_keywords": []}
             requests.put(user_db_url, json=user_data_payload)
             
         return {"email": email, "uid": uid, "name": user_name, "idToken": id_token, "interests": user_interests}
@@ -319,9 +357,9 @@ if st.session_state.logged_in:
     # 2. 페이지 라우팅
     if st.session_state.page == 'onboarding':
         # --- 1-A. 온보딩 페이지\ ---
-        st.markdown(f"<h1>{yongyong_icon_html} 용용이 비서 시작하기</h1>", unsafe_allow_html=True)
+        st.markdown(f"<h1>{yongyong_icon_html} 용용이 시작하기</h1>", unsafe_allow_html=True)
         st.subheader(f"{st.session_state.user_info['name']}님, 환영합니다!")
-        st.write("용용이 비서가 맞춤형 정보를 추천해드릴 수 있도록, 관심사를 선택해주세요. (선택사항)")
+        st.write("용용이가 맞춤형 정보를 추천해드릴 수 있도록, 관심사를 선택해주세요. (선택사항)")
 
         INTEREST_OPTIONS = [
             "학사공지", "장학금", "셔틀버스", 
@@ -402,8 +440,8 @@ if st.session_state.logged_in:
         with st.popover(user_initial): # 👤
             st.write(f"{st.session_state.user_info['name']}님, 환영합니다.")
             st.divider()
-            st.button("관심사 수정", on_click=go_to_onboarding, use_container_width=True)
-            st.button("로그아웃", on_click=do_logout, use_container_width=True)
+            st.button("⚙️ 관심사 수정", on_click=go_to_onboarding, use_container_width=True)
+            st.button("🚪 로그아웃", on_click=do_logout, use_container_width=True)
             
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -455,7 +493,7 @@ if st.session_state.logged_in:
         """
         st.markdown(f"""
             <div style="text-align: center;">
-                <h2>{yongyong_icon_html} 서일대학교 AI 챗봇 '용용이 비서'</h2>
+                <h2>{yongyong_icon_html} 서일대학교 AI 챗봇 '용용이'</h2>
                 <p>안녕하세요! 서일대학교에 대해 궁금한 점을 무엇이든 물어보세요.</p>
             </div>
             """, unsafe_allow_html=True)
@@ -499,6 +537,23 @@ if st.session_state.logged_in:
                     response = chat_session.send_message(final_prompt)
                     ai_response = response.text
                     st.markdown(ai_response)
+
+                    # 추천 질문 클릭 시에도 지도 표시 로직 추가
+                    target_location = None
+                    for loc_name, data in SEOIL_LOCATIONS.items():
+                         if loc_name in ai_response or any(k in ai_response for k in data.get('keywords', [])) or \
+                            any(k in user_question for k in data.get('keywords', [])):
+                             target_location = loc_name
+                             break
+                    
+                    if target_location:
+                        data = SEOIL_LOCATIONS[target_location]
+                        # 이미지 함수 사용
+                        map_image = highlight_building_on_image(target_location, data['x'], data['y'])
+                        if map_image:
+                             st.divider()
+                             st.caption(f"📍 **{target_location}** 위치 안내")
+                             st.image(map_image, caption=f"{target_location} ({data['desc']})", use_container_width=True)
             
             st.session_state.messages.append({"role": "model", "content": ai_response})
             save_chat_log(uid, token, "model", ai_response)
@@ -614,6 +669,17 @@ if st.session_state.logged_in:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
+                # 이전 대화 기록에서 지도(이미지) 표시
+                if message["role"] == "model":
+                     for loc_name, data in SEOIL_LOCATIONS.items():
+                        # 건물 이름이나 키워드가 AI 답변에 포함되어 있는지 확인
+                        if loc_name in message["content"] or any(k in message["content"] for k in data.get('keywords', [])):
+                             # 이미지 함수 사용
+                             map_image = highlight_building_on_image(loc_name, data['x'], data['y'])
+                             if map_image:
+                                 st.image(map_image, caption=f"📍 {loc_name} ({data['desc']})", use_container_width=True)
+                             break
+
         # 8. 사용자 입력 처리 (기존 코드와 동일)
         if prompt := st.chat_input("질문을 입력해주세요..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -649,9 +715,27 @@ if st.session_state.logged_in:
             chat_session = model.start_chat(history=[{'role': 'user', 'parts': [system_instruction]}])
 
             with st.chat_message("model"):
-                response = chat_session.send_message(final_prompt)
-                ai_response = response.text
-                st.markdown(ai_response)
+                with st.spinner("답변 생성 중..."):
+                    response = chat_session.send_message(final_prompt)
+                    ai_response = response.text
+                    st.markdown(ai_response)
+
+                    # 직접 입력 시에도 지도(이미지) 표시
+                    target_location = None
+                    for loc_name, data in SEOIL_LOCATIONS.items():
+                        if loc_name in ai_response or any(k in ai_response for k in data.get('keywords', [])) or \
+                           any(k in prompt for k in data.get('keywords', [])):
+                            target_location = loc_name
+                            break
+
+                    if target_location:
+                        data = SEOIL_LOCATIONS[target_location]
+                        # 이미지 함수 사용
+                        map_image = highlight_building_on_image(target_location, data['x'], data['y'])
+                        if map_image:
+                             st.divider()
+                             st.caption(f"📍 **{target_location}** 위치 안내")
+                             st.image(map_image, caption=f"{target_location} ({data['desc']})", use_container_width=True)
 
             st.session_state.messages.append({"role": "model", "content": ai_response})
             save_chat_log(uid, token, "model", ai_response)
@@ -749,7 +833,7 @@ else:
 
     # --- 2. [로그인 안 된 상태] 로그인/회원가입 페이지 ---
     
-    st.markdown(f"<h1 style='text-align: center;'>{yongyong_icon_html} 서일대학교 용용이 비서</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='text-align: center;'>{yongyong_icon_html} 서일대학교 용용이</h1>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align: center;'>로그인 또는 회원가입을 해주세요.</h3>", unsafe_allow_html=True)
 
     col1, col_main, col3 = st.columns([1, 3, 1])
