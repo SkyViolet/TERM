@@ -1,11 +1,20 @@
+import streamlit as st
 import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
 import chromadb
 
-# 본인의 API 키를 입력하세요
-API_KEY = "AIzaSyD_BbwVdQZfH71Fez8gyDQlW09BbbY15VM"
-genai.configure(api_key=API_KEY)
+try:
+    # 1. secrets.toml에서만 키를 불러옵니다.
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
+    
+except (KeyError, FileNotFoundError):
+    st.error("GEMINI_API_KEY가 .streamlit/secrets.toml에 설정되지 않았습니다.")
+    st.stop()
+except Exception as e:
+    st.error(f"Gemini API 설정 중 오류 발생: {e}")
+    st.stop()
 
 def scrape_and_process_page(topic, url):
     """
